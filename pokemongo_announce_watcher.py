@@ -4,7 +4,7 @@ Pokemon GO Announcement Watcher
 ===============================
 Scrapes Pokemon Go announcements from multiple public sources and forwards
 them to an ntfy.sh topic for instant phone notifications.
-No Discord bot perms needed. No PC required to stay on.
+Includes Flask health endpoint for BetterStack/Render pings.
 
 Sources scraped:
 - PokemonGoLive.com official news (HTML scraped — slugs + per-article titles)
@@ -13,7 +13,7 @@ Sources scraped:
 Relayed to: ntfy.sh/pokemongo-announcements
 
 Run locally:  python3 pokemongo_announce_watcher.py
-Deploy to:   Render.com (free tier, no credit card needed)
+Deploy to:   Render.com (free tier web service)
 """
 
 import hashlib
@@ -37,7 +37,7 @@ app = Flask(__name__)
 # CONFIGURATION
 # ---------------------------------------------------------------------------
 
-NTFY_TOPIC = "pokemongo-announcements"   # phone subscribes to this
+NTFY_TOPIC = "pokemongo-announcements"   # <-- phone subscribes to this
 NTFY_PRIORITY = "5"                     # 1 (lowest) .. 5 (highest)
 POLL_INTERVAL = 300                     # 5 minutes between checks
 STATE_FILE = Path(__file__).with_suffix(".state.json")
@@ -48,17 +48,12 @@ HEADERS = {
                   "Chrome/127.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
 }
-REDDIT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) "
-                  "Gecko/20100101 Firefox/115.0",
-    "Accept-Language": "en-US,en;q=0.9",
-}
 
 # ---------------------------------------------------------------------------
 # FILTERS
 # ---------------------------------------------------------------------------
 
-# Sources that are HIGH-CONFIDENCE announcement feeds (always include regardless of keyword match)
+# Sources that are HIGH-CONFIDENCE announcement feeds (always include)
 HIGH_CONFIDENCE_SOURCES = {"Pokemon GO Live"}
 
 # Keywords that indicate this is a real announcement (not random content)
@@ -79,13 +74,14 @@ KEYWORDS = [
 
 # Substrings that indicate noise we should skip
 NOISE = [
-    "spoiler","discussion","question","help",
-    "iv","cp","trade","raid invite","looking for","lfg",
-    "shundo","hundo","nundo","iv check",
-    "my day","lmao","imagine","payed",
-    "passed away","rest in peace","rip",
-    "complaint","entitled","lured","shiny",
+    "spoiler", "discussion", "question", "help", "iv", "cp",
+    "trade", "raid invite", "looking for", "lfg",
+    "shundo", "hundo", "nundo", "iv check",
+    "my day", "lmao", "imagine", "payed",
+    "passed away", "rest in peace", "rip",
+    "complaint", "entitled", "lured", "shiny",
 ]
+
 
 def contains_keyword(title: str, source: str = "") -> bool:
     """Check if title is an announcement. High-confidence sources bypass keyword check."""
@@ -156,7 +152,7 @@ def scrape_serebii() -> list[dict]:
         resp.raise_for_status()
         html = resp.text
         # Serebii pogo news archive links: /pogo/news/YYYYMMDD.shtml
-        links = re.findall(r'href="(/pogo/news/\d+\.shtml)"', html)
+        links = re.findall(r'href="(/pogo/news/\d+\.shtml|/news/\d+pogo\.shtml)"', html)
         seen = set()
         for link in sorted(set(links)):
             if link in seen:
@@ -190,14 +186,16 @@ def scrape_reddit() -> list[dict]:
     try:
         resp = requests.get(
             "https://www.reddit.com/r/pokemongo/.rss?limit=25",
-            headers=REDDIT_HEADERS,
+            headers=HEADERS,
             timeout=15,
         )
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
         ns = {"atom": "http://www.w3.org/2005/Atom"}
 
-        entries = root.findall(".//atom:entry", ns)
+        entries = root.findall(".//atom:entry", ns) if root.find(".//atom:entry", ns) is not None else \
+                  root.findall(".//atom:item", ns)
+
         for entry in entries:
             title_el = entry.find("atom:title", ns)
             link_el = entry.find("atom:link", ns)
@@ -206,7 +204,6 @@ def scrape_reddit() -> list[dict]:
                 continue
             title = unescape(title_el.text or "")
             url = link_el.get("href", "")
-            # Skip pinned/distinguished posts that are just discussions
             if not contains_keyword(title, "Reddit r/pokemongo"):
                 continue
             results.append({
@@ -220,7 +217,7 @@ def scrape_reddit() -> list[dict]:
         try:
             resp = requests.get(
                 "https://www.reddit.com/r/pokemongo/.rss?limit=25",
-                headers=REDDIT_HEADERS, timeout=15)
+                headers=HEADERS, timeout=15)
             titles = re.findall(r'<title>(.*?)</title>', resp.text)
             urls = re.findall(r'<link[^>]*href="([^"]+)"', resp.text)
             for t, u in zip(titles[1:], urls[1:]):
@@ -268,6 +265,7 @@ def hash_entry(source: str, title: str, url: str) -> str:
 
 def notify_ntfy(source: str, title: str, url: str, updated: str = ""):
     """Send a notification to ntfy.sh."""
+    # Build notification body
     body_parts = [f"**{title}**", f"via {source}"]
     if updated:
         body_parts.append(f"Posted: {updated}")
@@ -300,27 +298,6 @@ def notify_ntfy(source: str, title: str, url: str, updated: str = ""):
 # MAIN LOOP
 # ---------------------------------------------------------------------------
 
-def process_entries(entries: list[dict], seen: dict, send: bool = True) -> int:
-    """Process a batch of entries — dedup, filter, optionally send."""
-    found_new = 0
-    for entry in entries:
-        h = hash_entry(entry["source"], entry["title"], entry["url"])
-        if h in seen:
-            continue
-        if not contains_keyword(entry["title"], entry["source"]):
-            continue
-        seen[h] = time.time()
-        if send:
-            notify_ntfy(
-                entry["source"],
-                entry["title"],
-                entry["url"],
-                entry.get("updated", ""),
-            )
-        found_new += 1
-    return found_new
-
-
 def main():
     print("=== Pokemon GO Announcement Watcher ===")
     print(f"Target: ntfy.sh/{NTFY_TOPIC}")
@@ -331,19 +308,37 @@ def main():
 
     while True:
         found_new = 0
-        for src_key, scraper in [
+        # Run each scraper
+        scrapers = [
             ("pokemongolive", scrape_pokemongolive),
             ("serebii", scrape_serebii),
             ("reddit", scrape_reddit),
-        ]:
+        ]
+
+        for src_key, scraper in scrapers:
             try:
                 entries = scraper()
             except Exception as e:
                 print(f"[ERROR] {src_key} crashed: {e}")
                 entries = []
-            found_new += process_entries(entries, seen)
 
-        # Prune old hashes (keep last 500)
+            for entry in entries:
+                h = hash_entry(entry["source"], entry["title"], entry["url"])
+                if h in seen:
+                    continue
+                if not contains_keyword(entry["title"], entry["source"]):
+                    continue
+                seen[h] = time.time()
+                # Send to ntfy
+                notify_ntfy(
+                    entry["source"],
+                    entry["title"],
+                    entry["url"],
+                    entry.get("updated", ""),
+                )
+                found_new += 1
+
+        # Prune old seen-entries (keep last 500)
         if len(seen) > 500:
             cut = len(seen) - 375
             for k in sorted(seen, key=lambda k: seen[k])[:cut]:
@@ -361,6 +356,7 @@ def main():
 # ---------------------------------------------------------------------------
 
 @app.route("/health")
+@app.route("/")
 def health():
     return "OK", 200
 
@@ -370,35 +366,35 @@ def health():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # If RUN_ONCE=1, do one sweep and report (for testing, no ntfy send)
+    # If RUN_ONCE=1, do one sweep and report (for testing)
     if os.environ.get("RUN_ONCE"):
-        print("=== TEST RUN (single sweep, no notifications) ===\n")
+        print("=== TEST RUN (single sweep) ===\n")
         state = load_state()
         seen = state["seen"]
+        found_new = 0
 
-        for src_key, scraper in [
-            ("pokemongolive", scrape_pokemongolive),
-            ("serebii", scrape_serebii),
-            ("reddit", scrape_reddit),
-        ]:
+        for src_key, scraper in [("pokemongolive", scrape_pokemongolive),
+                                  ("serebii", scrape_serebii),
+                                  ("reddit", scrape_reddit)]:
             print(f"\n--- Checking {src_key} ---")
             try:
                 entries = scraper()
             except Exception as e:
                 print(f"  ERROR: {e}")
                 entries = []
-            new = process_entries(entries, seen, send=False)
-            if new > 0:
-                for entry in entries:
-                    h = hash_entry(entry["source"], entry["title"], entry["url"])
-                    if h not in seen or time.time() - seen.get(h, 0) < 5:
-                        print(f"  [NEW] [{entry['source']}] {entry['title'][:80]}")
-            else:
-                print("  No new announcements.")
+            for entry in entries:
+                h = hash_entry(entry["source"], entry["title"], entry["url"])
+                if h in seen:
+                    continue
+                if not contains_keyword(entry["title"], entry["source"]):
+                    continue
+                print(f"  [NEW] [{entry['source']}] {entry['title'][:80]}")
+                found_new += 1
 
-        print(f"\nTotal new entries this sweep: {sum(1 for v in state['seen'].values())}")
+        print(f"\n=== Total: {found_new} new entries ===")
+        print(f"Seen cache: {len(seen)} entries")
     else:
-        # Start Flask in a background thread for health checks (keeps Render alive)
+        # Start Flask in a background thread for health checks
         port = int(os.environ.get("PORT", 8080))
         flask_thread = threading.Thread(
             target=lambda: app.run(host="0.0.0.0", port=port, threaded=True),

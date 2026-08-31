@@ -1,89 +1,79 @@
 # Pokemon GO Announcement Watcher — Setup Guide
 
 ## What This Does
-A 24/7 bot that monitors Pokemon Go official sources and sends you **instant phone notifications** via ntfy.sh — no Discord permissions, no PC always-on, nothing paid.
+A 24/7 bot running on Render.com that monitors Pokemon Go official sources and sends
+you instant phone notifications via ntfy.sh. No Discord permissions needed.
 
-The bot runs as a **Render.com web service** (free tier) with a Flask health endpoint. You ping it every 3-5 minutes via BetterStack (free) to keep it awake.
-
-## Quick Start
-
-### 1. Deploy to Render.com (Free Web Service)
-```bash
-# Files needed:
-# - pokemongo_announce_watcher.py
-# - requirements.txt  (flask + requests)
-# - render.yaml       (web service config)
-# - SETUP.md          (this file)
-
-# Push to GitHub, then:
-1. Go to https://render.com → Sign up (GitHub)
-2. Click "New" → "Web Service"
-3. Connect your GitHub repo
-4. Render auto-detects render.yaml
-5. Click "Create Web Service"
-```
-
-### 2. Set Up BetterStack Keep-Alive Ping
-1. Go to https://betterstack.com (free plan)
-2. Create an Uptime Monitor → choose "HTTP"
-3. URL: `https://your-app-name.onrender.com/health`
-4. Set interval to **3 minutes** (or whatever you prefer)
-5. This keeps the Render service awake indefinitely
-
-### 3. Install ntfy App on Phone
-- **Android**: [F-Droid](https://f-droid.org/packages/io.github.nntk5.ntfy/) or [Google Play](https://play.google.com/store/apps/details?id=io.github.nntk5.ntfy)
-- Open ntfy → tap "+" → enter: `pokemongo-announcements` → Subscribe
+The bot runs as a **Flask web service** on Render (free tier) with a `/health`
+endpoint that BetterStack pings every 3 minutes to keep it awake.
 
 ## Files
+- `pokemongo_announce_watcher.py` — Main bot script (Flask + scrapers + ntfy relay)
+- `requirements.txt` — Python dependencies (Flask + requests)
+- `render.yaml` — Render.com auto-deploy configuration
+- `SETUP.md` — This guide
 
-| File | Purpose |
-|------|---------|
-| `pokemongo_announce_watcher.py` | Bot script (Flask health endpoint + RSS/HTML scrapers + ntfy relay) |
-| `requirements.txt` | `flask` + `requests` |
-| `render.yaml` | One-click deploy config for Render (web service, free tier) |
-| `SETUP.md` | This file |
+## Setup Steps
 
-## What Gets Forwarded
-
-### Sources monitored
-1. **PokemonGoLive.com/en/news/** — official announcements (top 3 newest)
-2. **Reddit /r/pokemongo RSS** — community-mirrored official posts (top 25)
-3. **Serebii.net/pogo/** — news archive (if accessible)
-
-### Notification content
-Each ntfy notification contains:
-- **Title**: Announcement headline (truncated to 80 chars)
-- **Body**: Full headline + source + direct link to the article
-- **Tap action**: Opens the full article in your browser
-
-### Filters
-**INCLUDE** (announcements): update, event, news, raid, mega, community day, season, go fest, maintenance, bug fix, etc.
-
-**EXCLUDE** (noise): memes, discussion, shiny posts, IV talk, trade requests, "my day" posts, etc.
-
-## Testing Locally
+### 1. Create GitHub Repo
 ```bash
-# One-time test sweep (prints what it WOULD send, doesn't send)
+git init
+git add .
+git commit -m "Pokemon GO announcement watcher"
+git branch -M main
+# Create repo at https://github.com/new
+# Then follow GitHub's "push an existing repository" instructions
+```
+
+### 2. Deploy to Render
+1. Go to https://render.com → sign up with GitHub
+2. Click "New" → "Web Service"
+3. Connect your GitHub repo
+4. Render auto-detects render.yaml:
+   - Name: pokemongo-announce-watcher
+   - Build command: pip install -r requirements.txt
+   - Start command: python3 pokemongo_announce_watcher.py
+   - Health check path: /health
+5. Click "Create Web Service"
+
+### 3. Set Up BetterStack Keep-Alive
+1. Go to https://betterstack.com → free signup
+2. Create a new Monitor → choose "Web"
+3. Name: `PKGO Watcher Keepalive`
+4. URL: `https://your-app-name.onrender.com/health`
+5. Monitoring interval: **3 minutes** (minimum free tier)
+6. Region: same as Render (Oregon or Virginia)
+7. Click "Create Monitor"
+
+### 4. Install ntfy App on Phone
+- **Android**: Install [ntfy app](https://play.google.com/store/apps/details?id=io.github.nntk5.ntfy)
+  OR via [F-Droid](https://f-droid.org/packages/io.github.nntk5.ntfy/)
+- Open ntfy → tap "+" → enter: `pokemongo-announcements` → Subscribe
+
+### 5. You're Done!
+- Every 5 minutes, your bot polls Pokemon Go sources
+- New announcements → push notification to your phone
+- BetterStack pings every 3 min → keeps Render service awake (free tier)
+
+## Notifications Format
+Each notification includes:
+- **Title**: PKGO — [headline]
+- **Body**: Announcement body with source + link
+- **Tap**: Opens full article in browser
+- **Priority**: High (5) — will buzz even on silent
+
+## Testing
+```bash
+# Test scraping locally (no notifications sent)
 RUN_ONCE=1 python3 pokemongo_announce_watcher.py
 
-# Full mode (runs Flask on :8080 + polling loop)
+# Full run (Flask + polling loop)
 python3 pokemongo_announce_watcher.py
-# Visit http://localhost:8080/health to verify Flask is alive
+# Then visit http://localhost:8080/health
 ```
 
-## Customization
-Edit these values in `pokemongo_announce_watcher.py`:
-- `NTFY_TOPIC` — your private notification channel (default: `pokemongo-announcements`)
-- `POLL_INTERVAL` — seconds between checks (default: 300 = 5 min)
-- `KEYWORDS` list — what counts as an announcement
-- `NOISE` list — what to ignore
-- `REDDIT_HEADERS["User-Agent"]` — Reddit sometimes blocks default UA
-
-## Architecture
-```
-[ PokemonGoLive.com ] --scrape--> [ Your Bot on Render ]
-[ Reddit r/pokemongo ]  --RSS--         |
-[ Serebii.net ]      --scrape--       |--> ntfy.sh --> [ ntfy App on Phone ]
-                    [ State: dedup cache ]            (push notification)
-                    [ Flask: /health endpoint ]  <---- ping from BetterStack
-```
+## Troubleshooting
+- **"Service unavailable"** on Render → Check Render logs for Python errors
+- **No notifications** on phone → Verify ntfy app is subscribed to correct topic
+- **Bot sleeping** → Make sure BetterStack monitor is pinging /health every 3 min
+- **Too many notifications** → Bot uses SHA-256 dedup (same article won't repeat)
