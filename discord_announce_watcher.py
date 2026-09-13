@@ -23,7 +23,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import requests
+import threading
+import request
 from flask import Flask
 
 app = Flask(__name__)
