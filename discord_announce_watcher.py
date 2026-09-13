@@ -100,8 +100,11 @@ def set_last_message_id(msg_id: str):
 # ---------------------------------------------------------------------------
 
 
-def notify_ntfy(title: str, message: str, url: str = "") -> bool:
-    body_parts = [f"**{title}**", message]
+def notify_ntfy(title: str, message: str, url: str = "", attach_url: str = "") -> bool:
+    # Body has no Latin-1 restriction (it's UTF-8 bytes in the request body,
+    # not a header), so the full message is safe to send here in full —
+    # nothing needs truncating except the header-based Title above.
+    body_parts = [message]
     if url:
         body_parts.append(url)
     body = "\n".join(body_parts)
@@ -117,6 +120,10 @@ def notify_ntfy(title: str, message: str, url: str = "") -> bool:
         "Tags": "video_game",
         "Click": url,
     }
+    if attach_url:
+        # ntfy will fetch and attach this (inline preview for images; a
+        # tappable download link for video/other files).
+        headers["Attach"] = attach_url
     try:
         resp = requests.post(
             f"https://ntfy.sh/{NTFY_TOPIC}",
@@ -165,19 +172,49 @@ def fetch_discord_announcements() -> list[dict]:
             # msg["author"]["id"] to your bot's own user ID instead.
 
             content = msg.get("content", "").strip()
-            if not content:
+
+            # Pull text out of embeds too — announcement bots often put the
+            # real message (title/description) in an embed rather than
+            # plain content, which is why some of your test posts showed up
+            # with extra "# heading" / bullet text pulled in separately.
+            embed_text_parts = []
+            media_url = ""
+            for embed in msg.get("embeds", []):
+                if embed.get("title"):
+                    embed_text_parts.append(embed["title"])
+                if embed.get("description"):
+                    embed_text_parts.append(embed["description"])
+                if not media_url:
+                    if embed.get("image", {}).get("url"):
+                        media_url = embed["image"]["url"]
+                    elif embed.get("thumbnail", {}).get("url"):
+                        media_url = embed["thumbnail"]["url"]
+                    elif embed.get("video", {}).get("url"):
+                        media_url = embed["video"]["url"]
+
+            # Attachments (uploaded images/videos/files) take priority over
+            # embed media if both are present.
+            for attachment in msg.get("attachments", []):
+                content_type = attachment.get("content_type", "")
+                if content_type.startswith("image/") or content_type.startswith("video/"):
+                    media_url = attachment.get("url", media_url)
+                    break
+
+            full_text = "\n\n".join([content] + embed_text_parts).strip()
+            if not full_text and not media_url:
                 continue
 
-            clean_content = re.sub(r"\s+", " ", content).strip()
+            clean_content = re.sub(r"\s+", " ", full_text).strip()
 
             identifier = f"{msg['id']}|{DISCORD_CHANNEL_ID}"
 
             announcements.append({
                 "source": "Discord",
-                "title": clean_content[:200],
+                "title": clean_content[:200] if clean_content else "New announcement",
                 "url": f"https://discord.com/channels/{DISCORD_CHANNEL_ID}/{msg['id']}",
                 "identifier": identifier,
-                "full_content": content,
+                "full_content": full_text,
+                "media_url": media_url,
                 "timestamp": msg.get("timestamp", ""),
             })
 
@@ -219,9 +256,9 @@ def main():
 
                 title = entry["title"][:80]
                 url = entry["url"]
-                message = f"via Discord — {entry['full_content'][:200]}"
+                message = entry["full_content"] or entry["title"]
 
-                if notify_ntfy(title, message, url):
+                if notify_ntfy(title, message, url, attach_url=entry.get("media_url", "")):
                     found_new += 1
 
             if announcements:
@@ -274,8 +311,8 @@ if __name__ == "__main__":
                 continue
             title = entry["title"][:80]
             url = entry["url"]
-            message = f"via Discord — {entry['full_content'][:200]}"
-            if notify_ntfy(title, message, url):
+            message = entry["full_content"] or entry["title"]
+            if notify_ntfy(title, message, url, attach_url=entry.get("media_url", "")):
                 found_new += 1
                 print(f"  [NEW] {title[:60]}")
 
