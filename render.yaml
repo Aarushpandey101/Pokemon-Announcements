@@ -1,8 +1,8 @@
 services:
   - type: web
-    name: pokemongo-announce-watcher
+    name: discord-announce-watcher
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python3 pokemongo_announce_watcher.py
+    startCommand: python3 discord_announce_watcher.py
     healthCheckPath: /health
